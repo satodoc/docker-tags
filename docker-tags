@@ -1,0 +1,237 @@
+#!/bin/bash
+
+PROGRA_NAME="$( basename $0 )"
+
+# print to stderr at red letters.
+function output_error() {
+    echo -e "\e[31m$@\e[m" >&2
+    # For Mac terminal
+    # echo $'\e[31m'"$@"$'\e[0m' >&2
+}
+
+# Check install modules.
+NECESSARY_LIST=("curl" "jq")
+for cmd in ${NECESSARY_LIST[@]}; do
+    if ! `which ${cmd} > /dev/null 2>&1`; then
+        output_error "This program needs \"${cmd}\".Plese install yum|apt|apk etc.."
+        exit 1
+    fi
+done
+
+
+# output usage.
+function _usage() {
+  cat << __EOF__
+
+Usage:
+  ${PROGRA_NAME} [-o|--output-file output-file-path] [-r|--reverse] [-d|--detail] [-v|--verbose] [-h|--help] [IMAGE]
+
+Description:
+   Output tag list of specified Docker image.
+   Only one image can be specified.
+
+Options:
+  -o --output-file By default, output to staundard out, but specified this option to file.
+  -r --reverse     By default, sort direction is descending by name, but when this option is set it is ascending by name.
+  -d --detail      By default, only the tag name is output, but if this option is specified, the size and the last modified date are also output.
+  -v --verbose     Show the process progress. 
+  -h --help        Show help message.
+
+__EOF__
+}
+
+function _claen() {
+    if [ -n "${TMP_FILE_DIR}" -a -d "${TMP_FILE_DIR}" ]; then
+        rm -fr ${TMP_FILE_DIR}
+    fi
+}
+
+# Get taglist from docker hub api.
+function call_api() {
+    local TARGET_URL=$1
+    local RESPONSE_BODY_FILE=$2
+    # [note] curl option
+    # - "-s":--silent
+    # - "-S":--show-error
+    # - "-L":--location(suppor redirect)
+    # - "-o":--output(response body)
+    # - "-w":--write-out(output http-status etc.)
+    local CURL_OPT=""
+    if ! "${IS_VERBOSE}"; then
+        CURL_OPT="-s"
+    fi
+    CURL_OPT="${CURL_OPT} -S -L -w %{http_code}"
+    local HTTP_STATUS=$(curl ${CURL_OPT} -o ${RESPONSE_BODY_FILE} ${TARGET_URL})
+    local STATUS=$?
+    if [ ${STATUS} -ne 0 ]; then
+        output_error "Failure get tag list from docker hub api.(${HTTP_STAUS})"
+        cat ${RESPONSE_BODY_FILE}
+        echo ""
+        _claen
+        exit ${STATUS}
+    fi
+    if [ "${HTTP_STATUS}" != "200" ]; then
+        output_error "Failure get tag list from docker hub api.(HTTP_STATUS=${HTTP_STATUS})"
+        cat ${RESPONSE_BODY_FILE}
+        echo ""
+        _claen
+        exit 9
+    fi
+    return;
+}
+
+# Set default option value.
+OUTPUT_FILE=""
+IS_DETAIL=false
+IS_REVERSE=false
+IS_VERBOSE=false
+
+# Analyze parameter, because getopts is unsupported long name option.
+while [ $# -gt 0 ]; do
+    OPT_NAME=$(echo $1 | sed 's/^-\{1,2\}//')
+    case "${OPT_NAME}" in
+        'o' | 'output-file' )
+            OUTPUT_FILE=$2
+            if [[ -z "${OUTPUT_FILE}" ]] || [[ "${OUTPUT_FILE}" =~ ^-+ ]]; then
+                output_error "option requires an argument --${OPT_NAME}."
+                _usage
+                exit 1
+            fi
+            shift 2
+            ;;
+        'r' | 'reverse' )
+            IS_REVERSE=true
+            shift 1
+            ;;
+        'd' | 'detail' )
+            IS_DETAIL=true
+            shift 1
+            ;;
+        'v' | 'verbose' )
+            IS_VERBOSE=true
+            shift 1
+            ;;
+        'h' | 'help' )
+            _usage
+            exit 0
+            ;;
+        * )
+            if [[ "$1" =~ ^- ]]; then
+                output_error "${PROGRA_NAME}: illegal option -- '${OPT_NAME}'"
+                _usage
+                exit 1
+            fi
+            break
+            ;;
+    esac
+done
+
+# Check main(image name)parameter.
+if [ $# -ne 1 ]; then
+    output_error "Required docker image name(There is only one)."
+    _usage
+    exit 1
+fi
+IMAGE=$1
+
+##########################################
+# Main process.
+##########################################
+# Define emporary file.
+TMP_FILE_DIR="${TMPDIR:-"/tmp"}/docker-tag_$(date +'%Y%m%d%H%M%S')_$$"
+mkdir -p ${TMP_FILE_DIR}
+RESULT_JSON_FILE="${TMP_FILE_DIR}/result.json"
+
+# The first page setting.
+TARGET_URL="https://registry.hub.docker.com/v2/repositories"
+if [[ ! "${IMAGE}" =~ ^.+/.+$ ]]; then
+    # For official images.
+    TARGET_URL="${TARGET_URL}/library"
+fi
+TARGET_URL="${TARGET_URL}/${IMAGE}/tags/"
+PAGE_NO=1
+# Get taglist from docker hub api all pages.
+while [ "${TARGET_URL}" != "null" ]; do
+    RESPONSE_BODY_FILE=${TMP_FILE_DIR}/RESBODY_PAGE_${PAGE_NO}.json
+    # Calling docker hub api.
+    if "${IS_VERBOSE}"; then
+        echo "Getting tag list from docker hub at page ${PAGE_NO}..."
+    fi
+    call_api ${TARGET_URL} ${RESPONSE_BODY_FILE}
+    # Edit from response json to output json.
+    JSON_FILE=${TMP_FILE_DIR}/RESULT_PAGE_${PAGE_NO}.json
+    jq -c '.results' ${RESPONSE_BODY_FILE} > ${JSON_FILE} 2>&1
+    STATUS=$?
+    if [ ${STATUS} -ne 0 ]; then
+        output_error "Failure parse response."
+        cat ${RESPONSE_BODY_FILE}
+        echo ""
+        _claen
+        exit ${STATUS}
+    fi
+    if [ -f "${RESULT_JSON_FILE}" ]; then
+        # For the second time and later
+        mv -f "${RESULT_JSON_FILE}" "${RESULT_JSON_FILE}_org"
+        jq -s add "${RESULT_JSON_FILE}_org" "${JSON_FILE}" > "${RESULT_JSON_FILE}"
+    else
+        # For the first time only.
+        mv ${JSON_FILE} ${RESULT_JSON_FILE}
+    fi
+    STATUS=$?
+    if [ ${STATUS} -ne 0 ]; then
+        output_error "Failure merge json files."
+        _claen
+        exit ${STATUS}
+    fi
+    if "${IS_VERBOSE}"; then
+        echo "Complated get tag list from docker hub at page ${PAGE_NO}."
+    fi
+    # Get the next page from response json.
+    TARGET_URL=$(jq -r .next ${RESPONSE_BODY_FILE})
+    STATUS=$?
+    if [ ${STATUS} -ne 0 -o -z "${TARGET_URL}" ]; then
+        output_error "Failure getting next page url."
+        cat ${RESPONSE_BODY_FILE} 
+        _claen
+        exit ${STATUS}
+    fi
+    PAGE_NO=$(echo ${TARGET_URL} | sed -e 's/^\(http.\+\)\(\?\)\(\page=\)\([[:digit:]]\+\)$/\4/')
+    # For GNU
+    # PAGE_NO=$(echo ${TARGET_URL} | sed -E -e 's|^https?://.+\?page=([[:digit:]]+)$|\1|')
+done
+
+# Output process.
+if [ -n "${OUTPUT_FILE}" -a -f "${OUTPUT_FILE}" ]; then
+    rm ${OUTPUT_FILE}
+    touch ${OUTPUT_FILE}
+fi    
+JQ_FILTERS="sort_by(.name)"
+if ! "${IS_REVERSE}"; then
+    JQ_FILTERS="${JQ_FILTERS} | reverse"
+fi
+if "${IS_DETAIL}" ; then
+    JQ_FILTERS="${JQ_FILTERS} | map({tag: .name, size: .full_size, last_updated: .last_updated}) | .[] | [.tag, .size, .last_updated] | @tsv"
+    if [ -n "${OUTPUT_FILE}" ]; then
+        echo -e "tag\tsize\tlast_updated" >> ${OUTPUT_FILE}
+    else
+        echo -e "tag\tsize\tlast_updated"
+    fi
+else
+    JQ_FILTERS="${JQ_FILTERS} | map_values(\"${IMAGE}:\"+.name) | .[]"
+fi
+if [ -n "${OUTPUT_FILE}" ]; then
+    jq -r "${JQ_FILTERS}" ${RESULT_JSON_FILE} >> ${OUTPUT_FILE}
+else
+    jq -r "${JQ_FILTERS}" ${RESULT_JSON_FILE}
+fi
+STATUS=$?
+if [ ${STATUS} -ne 0 ]; then
+    output_error "Failure parse json response."
+    rm -fr ${TMP_FILE_DIR}
+    exit ${STATUS}
+fi
+
+# cleaning temporary etc.
+_claen
+
+exit 0
