@@ -1,6 +1,7 @@
 #!/bin/bash
 
 PROGRA_NAME="$( basename $0 )"
+SED=${SED:=sed}
 
 # print to stderr at red letters.
 function output_error() {
@@ -88,7 +89,7 @@ IS_VERBOSE=false
 
 # Analyze parameter, because getopts is unsupported long name option.
 while [ $# -gt 0 ]; do
-    OPT_NAME=$(echo $1 | sed 's/^-\{1,2\}//')
+    OPT_NAME=$(echo $1 | $SED 's/^-\{1,2\}//')
     case "${OPT_NAME}" in
         'o' | 'output-file' )
             OUTPUT_FILE=$2
@@ -195,9 +196,9 @@ while [ "${TARGET_URL}" != "null" ]; do
         _claen
         exit ${STATUS}
     fi
-    PAGE_NO=$(echo ${TARGET_URL} | sed -e 's/^\(http.\+\)\(\?\)\(\page=\)\([[:digit:]]\+\)$/\4/')
+    PAGE_NO=$(echo ${TARGET_URL} | $SED -e 's/^\(http.\+\)\(\?\)\(\page=\)\([[:digit:]]\+\)$/\4/')
     # For GNU
-    # PAGE_NO=$(echo ${TARGET_URL} | sed -E -e 's|^https?://.+\?page=([[:digit:]]+)$|\1|')
+    # PAGE_NO=$(echo ${TARGET_URL} | $SED -E -e 's|^https?://.+\?page=([[:digit:]]+)$|\1|')
 done
 
 # Output process.
